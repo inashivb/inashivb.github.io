@@ -5,16 +5,16 @@ rssFullContent = true
 favicon = "/favicon.png"
 
 [footer]
-since = 2020
+since = 2025
 customText = ""
 
 [dateFormat]
-published = "Jan 02, 2006"
-lastUpdated = "Jan 02, 2006 15:04 MST"
+#published = "13 May 2025"
+#lastUpdated = "May 13, 2025 16:15 IST"
 
 [sidebar]
-emoji = "🍥"
-subtitle = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+emoji = "🐢"
+subtitle = "An inventory of my thoughts and learnings"
 
 [sidebar.avatar]
 enabled = true
@@ -27,18 +27,18 @@ math = false
 readingTime = true
 
 [article.license]
-enabled = true
-default = "Licensed under CC BY-NC-SA 4.0"
+enabled = false
+default = "Licensed under MIT License"
 
 ## Widgets
 [[widgets.homepage]]
 type = "search"
 
-[[widgets.homepage]]
-type = "archives"
+#[[widgets.homepage]]
+#type = "archives"
 
-[widgets.homepage.params]
-limit = 5
+#[widgets.homepage.params]
+#limit = 5
 
 [[widgets.homepage]]
 type = "categories"
@@ -76,7 +76,7 @@ enabled = true
 
 ## Comments
 [comments]
-enabled = true
+enabled = false
 provider = "disqus"
 
 [comments.disqusjs]
