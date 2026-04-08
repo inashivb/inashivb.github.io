@@ -1,6 +1,6 @@
 ---
 title: Suricata flowbits don't always flow
-description: This is a story of a series of failures about an on-going problem solving but with interesting things that I learned on the way.
+description: This is a story of a series of learnings collected while solving an interesting problem.
 slug: suricata-flowbits-dont-always-flow
 date: 2026-03-08 00:00:00+0000
 image: cover.jpg
@@ -185,10 +185,10 @@ Satisfiability problems are a part of the regular computer science everyday prob
     Package A depends on Package B >= 0.5 depends on Package C == 2.3 depends on Package D == 7.9.0
     depends on Package B < 0.4 and BAM!
 
-    Sound familiar? :)
+    Sound familiar? 😄
 
     Package managers work because yes they use incredibly intelligent algorithms that are usually
-    backtracking based (you're able to go back to the last good decision -- unlike your life :) )
+    backtracking based (you're able to go back to the last good decision -- unlike your life 🙃 )
 
     but they can always run into "failure" scenarios.
 
@@ -198,18 +198,18 @@ Satisfiability problems are a part of the regular computer science everyday prob
     package, etc and with such assistances, it mostly works out because there's a definite, relatively
     small list of clauses.
 
-    This can however become an NP-Hard problem by increasing the difficulty by a bit (NOT BYTE) ;)
+    This can however become an NP-Hard problem by increasing the difficulty by a bit (NOT BYTE) 😉
     See: https://stackoverflow.com/questions/28099683/algorithm-for-dependency-resolution
 
     [YES I GAVE YOU A STACKOVERFLOW LINK AND NOT AN AI PROMPT, DEAL WITH IT!]
 
     There are excellent package managers out there today like one I briefly analyzed in a hope to find
-    solution to my problems \*sobs\*: https://pubgrub-rs-guide.pages.dev
+    solution to my problems 😭: https://pubgrub-rs-guide.pages.dev
 
     But, in the end, none of them can guarantee to find you a solution.
 
 If it's NP-Complete or worse, why do I still have a working version of all applications mentioned
-above? Great question! (Feeling like sycophant AI at this point ;_;)
+above? Great question! (Feeling like sycophant AI at this point 🥲)
 
 Because with some assistance and limited variables, there is a chance of finding solutions. However, all
 SAT solvers come with a timeout for obvious reasons.
@@ -640,4 +640,4 @@ the analysis or the content. I decided to write this blog post despite there bei
 work is close to a finished state or will be accepted just because this took on and off a lot of research,
 failures, trials at different solutions and understanding several new and interesting concepts over a long period of time.
 
-Thanks for reading! ^_^
+Thanks for reading! 😺
