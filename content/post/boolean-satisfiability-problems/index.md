@@ -1,3 +1,22 @@
+---
+title: Suricata flowbits don't always flow
+description: This is a story of a series of failures about an on-going problem solving but with interesting things that I learned on the way.
+slug: suricata-flowbits-dont-always-flow
+date: 2026-03-08 00:00:00+0000
+image: cover.jpg
+categories:
+    - technical
+    - story
+tags:
+    - suricata
+    - flowbits
+    - sat
+    - boolean-satisfiability
+    - cnf
+    - graph
+weight: 1       # You can add weight to some posts to override the default sorting (date descending)
+---
+
 # Suricata flowbits don't always flow
 
 Welcome, reader!
@@ -14,11 +33,12 @@ that can be set, tracked and modified per flow. These help with:
 - Progress tracking
 per flow.
 
-Examples of flowbits usage from the popular ET Open ruleset STODO:
+Examples of flowbits usage from the popular ET Open ruleset:
 
-```
-alert http any any -> any any (http.method; content:"GET"; flowbits:isnotset,REQ; flowbits:isnotset,RESP; flowbits:set,REQ; sid:1;)
-alert http any any -> any any (http.stat_code; content:"200"; flowbits:isset,REQ; flowbits:isnotset,RESP; flowbits:set,RESP; sid:2;)
+```diff
+alert tcp any any -> $HOME_NET 3389 (msg:"ET DOS Microsoft Remote Desktop (RDP) Session Established Flowbit Set"; flow:established,to_server; flowbits:isset,ms.rdp.synack; flowbits:set,ms.rdp.established; flowbits:unset,ms.rdp.synack; flowbits:noalert; reference:cve,2012-0152; classtype:not-suspicious; sid:2014386; rev:5; metadata:created_at 2012_03_15, signature_severity Major, updated_at 2024_03_14;)
+alert tcp any any -> $HOME_NET 3389 (msg:"ET DOS Microsoft Remote Desktop (RDP) Syn then Reset 30 Second DoS Attempt"; flags:R; flow:to_server; flowbits:isnotset,ms.rdp.established; flowbits:isset,ms.rdp.synack; flowbits:unset,ms.rdp.synack; reference:cve,2012-0152; classtype:attempted-dos; noalert; sid:2014384; rev:9; metadata:created_at 2012_03_13, signature_severity Major, updated_at 2024_03_14;)
+alert tcp $HOME_NET 3389 -> any any (msg:"ET DOS Microsoft Remote Desktop (RDP) Syn/Ack Outbound Flowbit Set"; flow:from_server; flowbits:isnotset,ms.rdp.synack; flowbits:set,ms.rdp.synack; flowbits:noalert; flags:SA; reference:cve,2012-0152; classtype:not-suspicious; sid:2014385; rev:6; metadata:created_at 2012_03_15, cve CVE_2012_0152, signature_severity Major, updated_at 2024_03_14;)
 ```
 
 Now, these rules are ordered internally by Suricata in a way that they are evaluated correctly. There
@@ -28,7 +48,7 @@ Flowbit rules are ordered as follows:
 2. Write + Read operations on flowbits. Rules that do at least one Write operation and at least one Read operation
    like ISSET or ISNOTSET.
 3. Read operation on flowbits. Rules that check if one or more flowbits ISSET or ISNOTSET i.e. no state
-   change happens, the state is only read.
+   change happens, the existing state is only read.
 
 This has worked fine all this time until we hit an edge case and found that there can exist rules with
 complex ordering that is not easily determined by the internal sorting conditionals. The bug report can
@@ -40,17 +60,18 @@ be ordered such that this criteria is preserved for all read and write states.
 At first, it looked like a problem about finding the correct sorting order but soon I started to see
 edge cases one after the other including [one](https://redmine.openinfosecfoundation.org/issues/7771) "unsatisfiable" at runtime.
 So, I went on a quest to find how to resolve dependencies and..
+
 ![Alt Text](https://media1.tenor.com/m/JdTGkFCQQ8YAAAAd/spongebob-squarepants-spongebob.gif)
 
 I landed on something called Boolean Satisfiability Problems and it was quite a topic. It took a long time
-to understand what it is. I had to in order to determine if what I was dealing with also fell in the
+to understand what it is. I had to.. in order to determine if what I was dealing with also fell in the
 same category. Let's understand it in a simplified way with basic examples.
 
 
 ## What are Boolean Satisfiability Problems?
 
-Everything that can be reduced to a boolean expression such that the said expression can then be
-satisfied at runtime for all values provided.
+Every problem that can be reduced to a boolean expression such that the said expression can then be
+verified to be satisfiable for all inputs.
 
 e.g. ``A ∧ ¬B``  -- this is a basic boolean expression (read as A *and* *not* B)
 
@@ -61,12 +82,13 @@ An expression can also look like ``(A ∧ ¬B) ∨ (¬A ∧ B)`` -- a sub-expres
 
 Simple enough, isn't it? Actually, it's an NP-Complete problem with certain specialized cases even
 classified as NP-Hard. Another blog post is due to explain NP-Complete and NP-Hard.
-But, are all SAT problems this hard? Not really. As long as the literals stay <= 2, the SAT problem
-is verifiable in polynomial time with even a scope of finding a solution in ``O(n + m)``
+But, are all SAT problems this hard? Not really. As long as the literals stay <= 2, or the clauses
+are less, the SAT problem is verifiable in polynomial time with even a scope of finding a solution
+in ``O(n + m)``
 
-where, n = number of literals
+where, `n` = number of literals
 
-and, m = number of clauses
+and, `m` = number of clauses
 
 Let's say our problem at hand is finding if the expression ``(A ∧ ¬B)`` is satisfiable at runtime.
 
@@ -81,7 +103,7 @@ Let's say our problem at hand is finding if the expression ``(A ∧ ¬B)`` is sa
 | 1 | 0 |   1    |Yes!        |
 
 It's an easy problem. So easy in fact that it is easily verifiable using a simple Truth Table.
-But, how does this reduce to a SAT problem? Let's now see how SAT problems are represented.
+But, how was this reduced to a SAT problem? Let's now see how SAT problems are represented.
 
 ### Representation of a SAT problem
 
@@ -92,11 +114,11 @@ SAT problems are represented in Conjunctive Normal Form (CNF).
 Simply put, CNF is a way of expressing a boolean formula using conjunctions of clauses.
 So, instead of having an expression like ``A ∨ (B ∧ C)``, a SAT solver would use an algorithm like
 [Tseitin encoding](https://people.cs.umass.edu/~marius/class/h250/lec2.pdf) to convert this into a CNF by introducing an auxiliary variable.
-It is probably not needed for small expressions but when there is a larger expression at hand.
+It is probably not needed for small expressions but for when there are larger expressions at hand.
 
 The idea is to introduce an auxiliary variable, say ``X`` where  ``X ≡ (B ∧ C)`` and add clauses that would
 result in the same outcome as the original expression but all AND'ed. Here, the ``(B ∧ C)`` was the
-complex clause whereas ``A`` a standalone literal so it was chosen. However, the choice is not that
+complex clause whereas ``A`` a standalone literal so ``(B ∧ C)`` was chosen. However, the choice is not that
 simple when multiple clauses are present and an [Abstract Syntax Tree](https://en.wikipedia.org/wiki/Abstract_syntax_tree) is used as a part of the
 algorithms like _Tseitin encoding_ to determine which expressions must act as the auxiliary variables
 so as to easily reduce the expression to CNF.
@@ -158,12 +180,12 @@ Satisfiability problems are a part of the regular computer science everyday prob
     care of all that needs to be taken care of. At this point, either you're lying to yourself or
     you've broken the internet already. Well, your package manager has.. with its algorithm.
 
-    I've already disclosed that this is a boolean satisfiability problem so why are the package
-    managers still working fine? Are they, really?
+    I've already disclosed that this is a boolean satisfiability problem so why are the
+    package managers still working fine? Are they, really?
     Package A depends on Package B >= 0.5 depends on Package C == 2.3 depends on Package D == 7.9.0
     depends on Package B < 0.4 and BAM!
 
-    Sound familiar? Sorry for the reality check, dear reader. :)
+    Sound familiar? :)
 
     Package managers work because yes they use incredibly intelligent algorithms that are usually
     backtracking based (you're able to go back to the last good decision -- unlike your life :) )
@@ -173,7 +195,8 @@ Satisfiability problems are a part of the regular computer science everyday prob
     This is where **you** come in.
 
     You either upgrade the entire main package, or pin a sub package to a version or decide to keep multiple versions of a
-    package, etc and with such assistances, it mostly works out because there's a definite, relatively small list.
+    package, etc and with such assistances, it mostly works out because there's a definite, relatively
+    small list of clauses.
 
     This can however become an NP-Hard problem by increasing the difficulty by a bit (NOT BYTE) ;)
     See: https://stackoverflow.com/questions/28099683/algorithm-for-dependency-resolution
@@ -200,7 +223,7 @@ Most SAT solvers use either of the following algorithms:
 a non-chronological fashion and maintains a database of learnings about conflicts.
 
 Note that in the worst case scenarios, the time complexity is exponential! Since a binary tree is used
-to track the states, it comes out to ``O(2^n^)``.
+to track the states, it comes out to ``O(2ⁿ)``.
 
 We just talked about ``pubgrub`` and turns out it is based on CDCL as well with more things to make it fast,
 flexible but as the author (of the algorithm, not just the blog post!) Natalie Weizenbaum explains her
@@ -245,15 +268,17 @@ Rough idea was:
 and I hit the first issue soon enough.
 
 I had over generalized the "Read" and "Write" definitions. That meant that a good set of rules like the following:
+
 ```
 flowbits:isset,A; flowbits:set,B; sid:1;
 flowbits:isset,B; flowbits:unset,A; flowbits:unset,B; sid:2;
 ```
 
-STODO image
+<video width="640" height="480" controls>
+  <source src="flowbits_cycle.mp4" type="video/mp4">
+</video>
 
-
-Was now rejected for having a cyclic dependency!
+was now rejected for having a cyclic dependency!
 
 ## Failed Solution Attempt #2
 
@@ -267,16 +292,17 @@ out. So, now, the algorithm remained mostly the same with some changes:
 This was all done in Rust and I used the [Petgraph](https://github.com/petgraph/petgraph) library's StableDiGraph.
 I don't know if I was using good Rust practices but well.. it compiled.
 
-STODO hamster meme
+![](sad-mouse-big-eyes.png)
 
 I still was not confident and wondered if I was missing more cases and indeed there were. New questions arose:
-1. I felt that isnotset command was an independent command as per its usage. It was something that was
+1. I felt that `isnotset` command was an independent command as per its usage. It was something that was
    used to track the state until the first time something was set. However, my mentor argued that it is a
-   dependent command and should be affected by the presence of unset and toggle commands. So, now the dependency
+   dependent command and should be affected by the presence of `unset` and `toggle` commands. So, now the dependency
    states were:
 
-   STODO image
-2. unset seemed invalid to be used without a tie-up with a state.
+   ![](flowbits-dependency.jpg)
+
+2. `unset` seemed invalid to be used without a tie-up with a state.
    e.g.
 
    ```
@@ -314,8 +340,8 @@ flowbits:isset,A; sid:2;
 
 Here, sid:1 (`s1` from here on) must come before sid:2 (`s2` from here on). This is our dependency criteria.
 
-This can be made into the statement: ``s2 depends on s1`` or, ``if s2 then s1``.
-The boolean expression for this statement can be expressed as: ¬s2 ∨ s1  (NOT s2 OR s1)
+This can be made into the statement: **s2 depends on s1** or, **if s2 then s1**.
+The boolean expression for this statement can be expressed as: ``¬s2 ∨ s1``  (NOT s2 OR s1)
 
 To be sure, our favorite:
 
@@ -326,7 +352,7 @@ To be sure, our favorite:
 | 1  |  0 |   1    |
 | 1  |  1 |   1    |
 
-The expression is satisfiable in all cases except when s2 exists without s1. This is correct. isset without set
+The expression is satisfiable in all cases except when s2 exists without s1. This is correct. `isset` without `set`
 is invalid and would never result in a match. This is accepted by Suricata but a warning is issued.
 
 Let's use slightly more complex flowbits rules now.
@@ -341,16 +367,18 @@ flowbits:isset,C; sid:4;
 This is exactly the flowbit and rule structure in the ticket that started this work.
 Here, the dependencies look like the following.
 
-Flowbit ``A``: s2 depends on s1 : ¬s2 ∨ s1
-Flowbit ``B``: s3 depends on s2 : ¬s3 ∨ s2
-Flowbit ``C``: s4 depends on s3 : ¬s4 ∨ s3
+Flowbit ``A``: s2 depends on s1 : ``¬s2 ∨ s1``
+
+Flowbit ``B``: s3 depends on s2 : ``¬s3 ∨ s2``
+
+Flowbit ``C``: s4 depends on s3 : ``¬s4 ∨ s3``
 
 Notice how we had to split things out per flowbit to make them legible.
 
 Now, in order to convert it into CNF, we must simply AND all the individual clauses that we were able to come
 up with because they all must exist at once for the ruleset containing these 4 rules to be considered satisfiable.
 
-CNF := (¬s2 ∨ s1) ∧ (¬s3 ∨ s2) ∧ (¬s4 ∨ s3)
+CNF := ``(¬s2 ∨ s1) ∧ (¬s3 ∨ s2) ∧ (¬s4 ∨ s3)``
 
 The truth table for this expression will be:
 
@@ -374,13 +402,18 @@ The truth table for this expression will be:
 |  1 |  1 |  1 |  1 |   1    |
 
 So, this expression is correctly satisfiable in the following cases:
+
 i. None of the rules exist
+
 ii: s1 exists alone
+
 iii: s1 and s2 exist
+
 iv: s1, s2 and s3 exist
+
 v: all signatures exist
 
-Since we are willing to find the exact order of the signatures, our key takeaway is point v that states that there
+Since we are willing to find the exact order of the signatures, our key takeaway is point **v** that states that there
 does exist a way for the dependencies to be satisfiable at runtime indeed with all the rules present.
 Note that SAT equations are "verifiable" in polynomial time.
 This time, I decided to verify my analysis using a SAT solver. One popular and easy choice is [Z3](https://github.com/Z3Prover/z3)
@@ -409,7 +442,7 @@ else:
     print("Unsatisfiable at runtime :(")
 ```
 
-I found out that a problem here is that Z3 only finds one solution at a time so, we have to "guide" it by blocking
+I found out that there was problem - Z3 only finds one solution at a time so, we have to "guide" it by blocking
 the solutions it has already found (ring a bell?) or use other ways to get *all* the solutions. If you run the above
 script, Z3 finds you the easiest solution that is satisfiable: all values set to False.
 
@@ -463,14 +496,18 @@ Solution #4: {'s1': True, 's2': True, 's3': True, 's4': False}
 Solution #5: {'s1': True, 's2': True, 's3': True, 's4': True}
 ```
 
-so, the manual solution checking and equation creation checks out!
+so, the manual solution checking and equation creation checks out!**
 
 Now, how can I automate the creation of the constraints? Notice how in order to create the SAT equation, I had to
-break things down per flowbit, so, that's what we go with. This now requires a map of all sids for each flowbit
-per command. This is already somewhat done in Suricata to check if a flowbit is checked without being set.
-So, each flowbit will have 5 arrays, let's say we're dealing with the same flowbits in the above example.
+break things down per flowbit, so, at least that looks like a good route. This information is not available at the signature
+ordering time but it would have to be retrieved. The logical flow requires a map of all sids for each flowbit
+per command. This is already somewhat done in Suricata to check inconsistencies among the commands. But, this happens at
+end of the entire ordering and grouping and a warning is issued in such a case. We need more though to solve the
+ordering problem.
+Moving forward, each flowbit will have 5 arrays, let's say we're dealing with the same flowbits in the above example.
 There are 3 distinct flowbits.
 
+```
 Flowbit A:
   set_sids: [1]
   isset_sids: [2]
@@ -491,12 +528,116 @@ Flowbit C:
   isnotset_sids: []
   toggle_sids: []
   unset_sids: []
+```
 
 Now, we must define the dependency order among the commands. So, far, it seems safe to assume that the following
-is acceptable:
+is acceptable as shown earlier:
 
-STODO image
+![](flowbits-dependency.jpg)
 
 Generic constraint evaluation then becomes:
 
+1. for each flowbit:
 
+     create a one to many map of isset_sids and (set_sids and toggle_sids)
+
+     create a one to many map of isnotset_sids and (unset_sids and toggle_sids)
+2. Create a consolidated map of all flowbit maps.
+3. for each entry (dependent_sid, dependee_sid) in the map
+
+     add a clause `c`: Or(Not(dependent_sid), dependee_sid)
+
+     add the clause to SAT solver: solver.add(`c`)
+
+and that should be our final boolean expression**.
+
+Now, running this boolean expression through a SAT solver should tell you if an arrangement is possible among
+the given set of signatures.
+But, we just learned that SAT solvers give one solution at a time. Good news is that we can freeze the literals
+to a certain value. So, in Z3, for example, we could force any variable to be true:
+
+```
+solver.add(s == True)
+```
+
+By forcing this constraint, I am basically asking SAT solver if a solution exists if **all** the flowbits rules
+were enabled. If there's no solution, we can always go to another possible solution using blocking clauses.
+
+Now, because I know for sure which rules should be enabled to make the ruleset satisfiable at runtime, I can go
+back to directed graphs for the actual final solution. Some corrections on the last algorithm based on how I was
+able to reduce the problem to SAT are:
+1. Node types should only be signatures but all flowbit signatures not just the complex ones like before
+2. The dependent-dependee map should be used to create relationships -- Problem that stays: we could
+   still run into "unreachable" nodes which is OK but they make it hard to define the order. e.g.
+
+![](fb-unreachable-node.jpg)
+
+If there's a working algorithm, it could, in theory be used without a SAT solver while rejecting any ruleset that
+has unsatisfiable rule paths (cycles).
+Ofc the downside is that Suricata would simply reject the ruleset as impossible to match at runtime without any
+helpful directions on what needs to be done. SAT solvers can help with a possible solution quickly.
+
+Let's also see what the SAT equation would look like in case of an unsatisfiable ruleset.
+
+```
+flowbits:set,A; flowbits:isset,B; sid:1;
+flowbits:isset,A; flowbits:set,B; sid:2;
+```
+
+Flowbit ``A``: s2 depends on s1 : ``¬s2 ∨ s1``
+Flowbit ``B``: s1 depends on s2 : ``¬s1 ∨ s2``
+
+CNF := ``(¬s2 ∨ s1) ∧ (¬s1 ∨ s2)``
+
+Truth table for this expression:
+
+  | s1 | s2 | Output |
+  |----|----|--------|
+  | 0  |  0 |   1    |
+  | 0  |  1 |   0    |
+  | 1  |  0 |   0    |
+  | 1  |  1 |   1    |
+
+Wut.
+
+SAT solver says that cyclic dependency rules are solvable in two scenarios: Neither rule exists - OK.
+Both the rules exist - What?
+
+This, my dear reader was another blip in what was looking like a promising solution. Even SAT solvers and ASP
+solvers use directed graphs or ordered clauses to detect cycles.
+
+![](crying_cat.jpeg)
+
+### Outcomes of the SAT solver approach
+
+- While promising, SAT solvers also need guidance for special conditions.
+- With correct equations in SAT solvers, if a solution does not exist for all True values, we can remove that constraint
+and ask the solver to give a solution, any solution.
+
+**Noticed the stars above? They indicate that the equation although working for the cases at hand are incomplete.
+All equations need **ALL** possible clauses which is where Tseitin encoding like algorithms come in. For example, if
+A depends on B and B depends on C then apart from these clauses, one must add a transitive clause stating that
+A must also depend on C.
+
+## Conclusion
+
+The flowbits ordering issue was successfully reduced to a SAT problem.
+Can this all be done in polynomial time? For most practical cases, yes. If one were to stress test it, I don't know.
+The complexity goes up with the increase in literals (signatures) and clauses (dependencies created by each flowbit usage).
+
+There are alternatives like [ASP](https://www.cs.utexas.edu/~vl/papers/wiasp.pdf) that look promising. I don't know if I
+will explore it but if I do, you'll see in a blog post.
+
+Is this a solution to the problem then?
+I don't think so. While this research helped with the direction and clarifying what may or may not work, there are still
+edge cases, one of which I mentioned earlier in finding the actual solution.
+Stay tuned for the final solution, if any. For now, the battle continues..
+
+### Mandatory Note
+
+I assure you I'm a human and therefore, I am bound to make mistakes. Please feel free to point any obvious mistakes in
+the analysis or the content. I decided to write this blog post despite there being no clear indication if this
+work is close to a finished state or will be accepted just because this took on and off a lot of research,
+failures, trials at different solutions and understanding several new and interesting concepts over a long period of time.
+
+Thanks for reading! ^_^
