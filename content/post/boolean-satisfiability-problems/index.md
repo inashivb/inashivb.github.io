@@ -2,7 +2,7 @@
 title: Suricata flowbits don't always flow
 description: This is a story of a series of learnings collected while solving an interesting problem.
 slug: suricata-flowbits-dont-always-flow
-date: 2026-03-08 00:00:00+0000
+date: 2026-04-08 00:00:00+0000
 image: cover.jpg
 categories:
     - technical
