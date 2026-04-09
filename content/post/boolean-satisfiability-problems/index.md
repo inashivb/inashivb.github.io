@@ -437,7 +437,7 @@ if solver.check() == sat:
     print("Satisfiable equation :)")
     print("The solution is:")
     res = solver.model()
-    print(f"{model}")
+    print(f"{res}")
 else:
     print("Unsatisfiable at runtime :(")
 ```
