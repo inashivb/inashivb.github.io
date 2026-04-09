@@ -1,0 +1,839 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Story on An evolving mindspace</title><link>https://inashivb.github.io/categories/story/</link><description>Recent content in Story on An evolving mindspace</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Wed, 08 Apr 2026 00:00:00 +0000</lastBuildDate><atom:link href="https://inashivb.github.io/categories/story/index.xml" rel="self" type="application/rss+xml"/><item><title>Suricata flowbits don't always flow</title><link>https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/</link><pubDate>Wed, 08 Apr 2026 00:00:00 +0000</pubDate><guid>https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/</guid><description>&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/cover.jpg" alt="Featured image of post Suricata flowbits don't always flow" /&gt;&lt;h1 id="suricata-flowbits-dont-always-flow"&gt;Suricata flowbits don&amp;rsquo;t always flow
+&lt;/h1&gt;&lt;p&gt;Welcome, reader!&lt;/p&gt;
+&lt;p&gt;I&amp;rsquo;m assuming if you&amp;rsquo;ve landed on my blog you know what Suricata is, but, if you don&amp;rsquo;t, please check
+out &lt;a class="link" href="https://github.com/OISF/suricata" target="_blank" rel="noopener"
+&gt;https://github.com/OISF/suricata&lt;/a&gt;. As a part of my work at Suricata, I was tasked with what looked
+like a not so hard (solvable) problem. This problem entailed fixing how Suricata internally orders
+the signatures with flowbits for correct and efficient matching against the real world traffic.
+Let&amp;rsquo;s first get an idea of what a flowbit is. Learn about Flow &lt;a class="link" href="https://inliniac.net/blog/2014/07/28/suricata-flow-logging/" target="_blank" rel="noopener"
+&gt;here&lt;/a&gt;.
+The post is a bit outdated but most of the stuff is still the same. &lt;code&gt;flowbits&lt;/code&gt; are special kinds of bits
+that can be set, tracked and modified per flow. These help with:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;State tracking&lt;/li&gt;
+&lt;li&gt;Controlling the rule evaluation order&lt;/li&gt;
+&lt;li&gt;Progress tracking
+per flow.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Examples of flowbits usage from the popular ET Open ruleset:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-diff" data-lang="diff"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;alert tcp any any -&amp;gt; $HOME_NET 3389 (msg:&amp;#34;ET DOS Microsoft Remote Desktop (RDP) Session Established Flowbit Set&amp;#34;; flow:established,to_server; flowbits:isset,ms.rdp.synack; flowbits:set,ms.rdp.established; flowbits:unset,ms.rdp.synack; flowbits:noalert; reference:cve,2012-0152; classtype:not-suspicious; sid:2014386; rev:5; metadata:created_at 2012_03_15, signature_severity Major, updated_at 2024_03_14;)
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;alert tcp any any -&amp;gt; $HOME_NET 3389 (msg:&amp;#34;ET DOS Microsoft Remote Desktop (RDP) Syn then Reset 30 Second DoS Attempt&amp;#34;; flags:R; flow:to_server; flowbits:isnotset,ms.rdp.established; flowbits:isset,ms.rdp.synack; flowbits:unset,ms.rdp.synack; reference:cve,2012-0152; classtype:attempted-dos; noalert; sid:2014384; rev:9; metadata:created_at 2012_03_13, signature_severity Major, updated_at 2024_03_14;)
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;alert tcp $HOME_NET 3389 -&amp;gt; any any (msg:&amp;#34;ET DOS Microsoft Remote Desktop (RDP) Syn/Ack Outbound Flowbit Set&amp;#34;; flow:from_server; flowbits:isnotset,ms.rdp.synack; flowbits:set,ms.rdp.synack; flowbits:noalert; flags:SA; reference:cve,2012-0152; classtype:not-suspicious; sid:2014385; rev:6; metadata:created_at 2012_03_15, cve CVE_2012_0152, signature_severity Major, updated_at 2024_03_14;)
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;Now, these rules are ordered internally by Suricata in a way that they are evaluated correctly. There
+are several properties at play but for the sake of this blog post, we&amp;rsquo;re only concerned with flowbits.
+Flowbit rules are ordered as follows:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Write operation on flowbits. Rules that SET, UNSET or TOGGLE a flowbit i.e. a state change happens.&lt;/li&gt;
+&lt;li&gt;Write + Read operations on flowbits. Rules that do at least one Write operation and at least one Read operation
+like ISSET or ISNOTSET.&lt;/li&gt;
+&lt;li&gt;Read operation on flowbits. Rules that check if one or more flowbits ISSET or ISNOTSET i.e. no state
+change happens, the existing state is only read.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;This has worked fine all this time until we hit an edge case and found that there can exist rules with
+complex ordering that is not easily determined by the internal sorting conditionals. The bug report can
+be seen &lt;a class="link" href="https://redmine.openinfosecfoundation.org/issues/7638" target="_blank" rel="noopener"
+&gt;here&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The idea is that in order to be able to &amp;ldquo;read&amp;rdquo; a flowbit, it must first be written. So, the rules should
+be ordered such that this criteria is preserved for all read and write states.&lt;/p&gt;
+&lt;p&gt;At first, it looked like a problem about finding the correct sorting order but soon I started to see
+edge cases one after the other including &lt;a class="link" href="https://redmine.openinfosecfoundation.org/issues/7771" target="_blank" rel="noopener"
+&gt;one&lt;/a&gt; &amp;ldquo;unsatisfiable&amp;rdquo; at runtime.
+So, I went on a quest to find how to resolve dependencies and..&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://media1.tenor.com/m/JdTGkFCQQ8YAAAAd/spongebob-squarepants-spongebob.gif"
+loading="lazy"
+alt="Alt Text"
+&gt;&lt;/p&gt;
+&lt;p&gt;I landed on something called Boolean Satisfiability Problems and it was quite a topic. It took a long time
+to understand what it is. I had to.. in order to determine if what I was dealing with also fell in the
+same category. Let&amp;rsquo;s understand it in a simplified way with basic examples.&lt;/p&gt;
+&lt;h2 id="what-are-boolean-satisfiability-problems"&gt;What are Boolean Satisfiability Problems?
+&lt;/h2&gt;&lt;p&gt;Every problem that can be reduced to a boolean expression such that the said expression can then be
+verified to be satisfiable for all inputs.&lt;/p&gt;
+&lt;p&gt;e.g. &lt;code&gt;A ∧ ¬B&lt;/code&gt; &amp;ndash; this is a basic boolean expression (read as A &lt;em&gt;and&lt;/em&gt; &lt;em&gt;not&lt;/em&gt; B)&lt;/p&gt;
+&lt;p&gt;You understand it well. Your computer understands it well.
+Here, A and B are what we call &amp;ldquo;literals&amp;rdquo;.&lt;/p&gt;
+&lt;p&gt;An expression can also look like &lt;code&gt;(A ∧ ¬B) ∨ (¬A ∧ B)&lt;/code&gt; &amp;ndash; a sub-expression like &lt;code&gt;(A ∧ ¬B)&lt;/code&gt; is called a &amp;ldquo;clause&amp;rdquo;.&lt;/p&gt;
+&lt;p&gt;Simple enough, isn&amp;rsquo;t it? Actually, it&amp;rsquo;s an NP-Complete problem with certain specialized cases even
+classified as NP-Hard. Another blog post is due to explain NP-Complete and NP-Hard.
+But, are all SAT problems this hard? Not really. As long as the literals stay &amp;lt;= 2, or the clauses
+are less, the SAT problem is verifiable in polynomial time with even a scope of finding a solution
+in &lt;code&gt;O(n + m)&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;where, &lt;code&gt;n&lt;/code&gt; = number of literals&lt;/p&gt;
+&lt;p&gt;and, &lt;code&gt;m&lt;/code&gt; = number of clauses&lt;/p&gt;
+&lt;p&gt;Let&amp;rsquo;s say our problem at hand is finding if the expression &lt;code&gt;(A ∧ ¬B)&lt;/code&gt; is satisfiable at runtime.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Truth table for &lt;code&gt;(A ∧ ¬B)&lt;/code&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;A&lt;/th&gt;
+&lt;th&gt;B&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;th&gt;Satisfiable&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;No&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;No&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;No&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;Yes!&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;It&amp;rsquo;s an easy problem. So easy in fact that it is easily verifiable using a simple Truth Table.
+But, how was this reduced to a SAT problem? Let&amp;rsquo;s now see how SAT problems are represented.&lt;/p&gt;
+&lt;h3 id="representation-of-a-sat-problem"&gt;Representation of a SAT problem
+&lt;/h3&gt;&lt;p&gt;SAT problems are represented in Conjunctive Normal Form (CNF).&lt;/p&gt;
+&lt;h4 id="cnf"&gt;CNF
+&lt;/h4&gt;&lt;p&gt;Simply put, CNF is a way of expressing a boolean formula using conjunctions of clauses.
+So, instead of having an expression like &lt;code&gt;A ∨ (B ∧ C)&lt;/code&gt;, a SAT solver would use an algorithm like
+&lt;a class="link" href="https://people.cs.umass.edu/~marius/class/h250/lec2.pdf" target="_blank" rel="noopener"
+&gt;Tseitin encoding&lt;/a&gt; to convert this into a CNF by introducing an auxiliary variable.
+It is probably not needed for small expressions but for when there are larger expressions at hand.&lt;/p&gt;
+&lt;p&gt;The idea is to introduce an auxiliary variable, say &lt;code&gt;X&lt;/code&gt; where &lt;code&gt;X ≡ (B ∧ C)&lt;/code&gt; and add clauses that would
+result in the same outcome as the original expression but all AND&amp;rsquo;ed. Here, the &lt;code&gt;(B ∧ C)&lt;/code&gt; was the
+complex clause whereas &lt;code&gt;A&lt;/code&gt; a standalone literal so &lt;code&gt;(B ∧ C)&lt;/code&gt; was chosen. However, the choice is not that
+simple when multiple clauses are present and an &lt;a class="link" href="https://en.wikipedia.org/wiki/Abstract_syntax_tree" target="_blank" rel="noopener"
+&gt;Abstract Syntax Tree&lt;/a&gt; is used as a part of the
+algorithms like &lt;em&gt;Tseitin encoding&lt;/em&gt; to determine which expressions must act as the auxiliary variables
+so as to easily reduce the expression to CNF.&lt;/p&gt;
+&lt;p&gt;The given expression with the new auxiliary expression &lt;code&gt;X&lt;/code&gt; comes out to be:&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;(A ∨ X) ∧ (¬X ∨ B) ∧ (¬X ∨ C)&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;You can see that the outputs remain the same for any values of &lt;code&gt;A&lt;/code&gt;, &lt;code&gt;B&lt;/code&gt; and &lt;code&gt;C&lt;/code&gt; as in the original
+expression to verify the correctness.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Truth Table for &lt;code&gt;A ∨ (B ∧ C)&lt;/code&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;A&lt;/th&gt;
+&lt;th&gt;B&lt;/th&gt;
+&lt;th&gt;C&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;&lt;strong&gt;Truth Table for &lt;code&gt;(A ∨ X) ∧ (¬X ∨ B) ∧ (¬X ∨ C)&lt;/code&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;A&lt;/th&gt;
+&lt;th&gt;B&lt;/th&gt;
+&lt;th&gt;C&lt;/th&gt;
+&lt;th&gt;X&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;These auxiliary variables are invisible to the final outcome and are introduced for the convenient
+conversion to CNF.&lt;/p&gt;
+&lt;h5 id="why-should-cnf-be-used"&gt;Why should CNF be used?
+&lt;/h5&gt;&lt;ul&gt;
+&lt;li&gt;Any expression is reducible to CNF in polynomial time&lt;/li&gt;
+&lt;li&gt;Allows for easy conflict analysis; faster exit if any clause were unsatisfiable&lt;/li&gt;
+&lt;li&gt;DNF (Distributive Conjunction Form) &amp;ndash; the opposite of CNF can lead to exponential blow up of the formula&lt;/li&gt;
+&lt;li&gt;It is complete and standardized distributive formulation&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id="applications-of-sat"&gt;Applications of SAT
+&lt;/h2&gt;&lt;p&gt;Satisfiability problems are a part of the regular computer science everyday problems like&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;CPU scheduling&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Network routing&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Machine Learning decision making&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Package dependency resolutions &amp;ndash; this is something that most of us have fought.&lt;/p&gt;
+&lt;p&gt;You may say what&amp;rsquo;s the problem here? My code works fine as it is and my package manager takes
+care of all that needs to be taken care of. At this point, either you&amp;rsquo;re lying to yourself or
+you&amp;rsquo;ve broken the internet already. Well, your package manager has.. with its algorithm.&lt;/p&gt;
+&lt;p&gt;I&amp;rsquo;ve already disclosed that this is a boolean satisfiability problem so why are the
+package managers still working fine? Are they, really?
+Package A depends on Package B &amp;gt;= 0.5 depends on Package C == 2.3 depends on Package D == 7.9.0
+depends on Package B &amp;lt; 0.4 and BAM!&lt;/p&gt;
+&lt;p&gt;Sound familiar? 😄&lt;/p&gt;
+&lt;p&gt;Package managers work because yes they use incredibly intelligent algorithms that are usually
+backtracking based (you&amp;rsquo;re able to go back to the last good decision &amp;ndash; unlike your life 🙃 )&lt;/p&gt;
+&lt;p&gt;but they can always run into &amp;ldquo;failure&amp;rdquo; scenarios.&lt;/p&gt;
+&lt;p&gt;This is where &lt;strong&gt;you&lt;/strong&gt; come in.&lt;/p&gt;
+&lt;p&gt;You either upgrade the entire main package, or pin a sub package to a version or decide to keep multiple versions of a
+package, etc and with such assistances, it mostly works out because there&amp;rsquo;s a definite, relatively
+small list of clauses.&lt;/p&gt;
+&lt;p&gt;This can however become an NP-Hard problem by increasing the difficulty by a bit (NOT BYTE) 😉
+See: &lt;a class="link" href="https://stackoverflow.com/questions/28099683/algorithm-for-dependency-resolution" target="_blank" rel="noopener"
+&gt;https://stackoverflow.com/questions/28099683/algorithm-for-dependency-resolution&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;[YES I GAVE YOU A STACKOVERFLOW LINK AND NOT AN AI PROMPT, DEAL WITH IT!]&lt;/p&gt;
+&lt;p&gt;There are excellent package managers out there today like one I briefly analyzed in a hope to find
+solution to my problems 😭: &lt;a class="link" href="https://pubgrub-rs-guide.pages.dev" target="_blank" rel="noopener"
+&gt;https://pubgrub-rs-guide.pages.dev&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;But, in the end, none of them can guarantee to find you a solution.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;If it&amp;rsquo;s NP-Complete or worse, why do I still have a working version of all applications mentioned
+above? Great question! (Feeling like sycophant AI at this point 🥲)&lt;/p&gt;
+&lt;p&gt;Because with some assistance and limited variables, there is a chance of finding solutions. However, all
+SAT solvers come with a timeout for obvious reasons.&lt;/p&gt;
+&lt;h2 id="sat-solvers"&gt;SAT solvers
+&lt;/h2&gt;&lt;p&gt;Most SAT solvers use either of the following algorithms:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;DPLL (Davis–Putnam–Logemann–Loveland)&lt;/strong&gt; - A backtracking based search algorithm.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;CDCL (Conflict-Driven Clause Learning)&lt;/strong&gt; - A smarter backtracking algorithm. It does &amp;ldquo;backjumping&amp;rdquo; in
+a non-chronological fashion and maintains a database of learnings about conflicts.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Note that in the worst case scenarios, the time complexity is exponential! Since a binary tree is used
+to track the states, it comes out to &lt;code&gt;O(2ⁿ)&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;We just talked about &lt;code&gt;pubgrub&lt;/code&gt; and turns out it is based on CDCL as well with more things to make it fast,
+flexible but as the author (of the algorithm, not just the blog post!) Natalie Weizenbaum explains her
+awesome work here: &lt;a class="link" href="https://nex3.medium.com/pubgrub-2fb6470504f" target="_blank" rel="noopener"
+&gt;https://nex3.medium.com/pubgrub-2fb6470504f&lt;/a&gt; the problem remains NP-Hard.&lt;/p&gt;
+&lt;h3 id="read-more"&gt;Read more
+&lt;/h3&gt;&lt;ol&gt;
+&lt;li&gt;&lt;a class="link" href="https://inria.hal.science/hal-03589602/file/ClementinTayou-mai2021.pdf" target="_blank" rel="noopener"
+&gt;https://inria.hal.science/hal-03589602/file/ClementinTayou-mai2021.pdf&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="link" href="https://www.geeksforgeeks.org/dsa/2-satisfiability-2-sat-problem/" target="_blank" rel="noopener"
+&gt;https://www.geeksforgeeks.org/dsa/2-satisfiability-2-sat-problem/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Wikipedia forever &amp;lt;3 &lt;a class="link" href="https://en.wikipedia.org/wiki/Boolean_satisfiability_problem" target="_blank" rel="noopener"
+&gt;https://en.wikipedia.org/wiki/Boolean_satisfiability_problem&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;There are international SAT competitions! &lt;a class="link" href="https://satcompetition.github.io" target="_blank" rel="noopener"
+&gt;https://satcompetition.github.io&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="suricata-and-flowbits-continued"&gt;Suricata and Flowbits continued&amp;hellip;
+&lt;/h2&gt;&lt;p&gt;Now, getting back to the problem at hand. It indeed started to look like a satisfiability problem
+but I saw how 2-SAT problems are solved and went head-in to see if I can reduce the problem in a way that
+even graphs can solve. And, I found a solution! &amp;hellip;or so I had thought.&lt;/p&gt;
+&lt;h2 id="failed-solution-attempt-1"&gt;Failed Solution Attempt #1
+&lt;/h2&gt;&lt;p&gt;My target was to find the correct dependency order for complex flowbit ordering, reject any cycles (see graph felt
+like a plausible solution if only I could convert the problem) and deal with some inefficient cases of
+command combinations that just did not make sense but can exist in theory.&lt;/p&gt;
+&lt;p&gt;The information available at hand at once is a signature and the flowbits inside this signature along with the
+commands that they are used with. So, I decided to make both signatures and flowbits as nodes in the
+graph. Now, the challenge was to represent the commands, so it made sense to use directions as the indicator
+of READ or WRITE. Quickly, I had an ugly but working &lt;a class="link" href="https://github.com/inashivb/blog-code-snippets/blob/master/notebooks/Flowbits%20Dependency%20Resolver%20%7C%20DEMO.ipynb" target="_blank" rel="noopener"
+&gt;proof of concept&lt;/a&gt; of an algorithm that passed the existing
+tests and the bug that started this quest!&lt;/p&gt;
+&lt;p&gt;Rough idea was:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Bring out the signatures that had Write + Read operations on flowbits.&lt;/li&gt;
+&lt;li&gt;For each signature, add a node of type &amp;ldquo;signature&amp;rdquo;
+i. For each flowbit in the signature, add a node of type &amp;ldquo;flowbit&amp;rdquo;
+ii. Add a directed edge from the flowbit node to the signature node if the flowbit had a Read command on it
+iii. Add a directed edge from the signature node to the flowbit node if the flowbit had a Write command on it&lt;/li&gt;
+&lt;li&gt;Normalize the graph i.e. remove flowbit nodes as they&amp;rsquo;re inconsequential in the final solution.&lt;/li&gt;
+&lt;li&gt;Check for cycles.&lt;/li&gt;
+&lt;li&gt;Connect any loner nodes (that had no dependency with others) with a dummy node to make them all reachable.&lt;/li&gt;
+&lt;li&gt;If no cycles were found, perform a BFS (Breadth First Search) of what should now be a DAG (Directed Acyclic Graph).&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;and I hit the first issue soon enough.&lt;/p&gt;
+&lt;p&gt;I had over generalized the &amp;ldquo;Read&amp;rdquo; and &amp;ldquo;Write&amp;rdquo; definitions. That meant that a good set of rules like the following:&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:isset,A; flowbits:set,B; sid:1;
+flowbits:isset,B; flowbits:unset,A; flowbits:unset,B; sid:2;
+&lt;/code&gt;&lt;/pre&gt;&lt;video width="640" height="480" controls&gt;
+&lt;source src="flowbits_cycle.mp4" type="video/mp4"&gt;
+&lt;/video&gt;
+&lt;p&gt;was now rejected for having a cyclic dependency!&lt;/p&gt;
+&lt;h2 id="failed-solution-attempt-2"&gt;Failed Solution Attempt #2
+&lt;/h2&gt;&lt;p&gt;Now, I had to figure out a way to make sure the commands are respected and not just generalized as Read or
+Write. My mentor asked if we could use weights on edges somehow and it seemed like a good thing to try
+out. So, now, the algorithm remained mostly the same with some changes:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;each edge had weight of the command that was in use&lt;/li&gt;
+&lt;li&gt;if a cycle was formed by edges of varying weights, the edge with higher weight (lower priority command)
+was removed&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This was all done in Rust and I used the &lt;a class="link" href="https://github.com/petgraph/petgraph" target="_blank" rel="noopener"
+&gt;Petgraph&lt;/a&gt; library&amp;rsquo;s StableDiGraph.
+I don&amp;rsquo;t know if I was using good Rust practices but well.. it compiled.&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/sad-mouse-big-eyes.png"
+width="382"
+height="450"
+srcset="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/sad-mouse-big-eyes_hu_2059828315d8f21f.png 480w, https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/sad-mouse-big-eyes_hu_cd5091f2b7d4d5a4.png 1024w"
+loading="lazy"
+class="gallery-image"
+data-flex-grow="84"
+data-flex-basis="203px"
+&gt;&lt;/p&gt;
+&lt;p&gt;I still was not confident and wondered if I was missing more cases and indeed there were. New questions arose:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;I felt that &lt;code&gt;isnotset&lt;/code&gt; command was an independent command as per its usage. It was something that was
+used to track the state until the first time something was set. However, my mentor argued that it is a
+dependent command and should be affected by the presence of &lt;code&gt;unset&lt;/code&gt; and &lt;code&gt;toggle&lt;/code&gt; commands. So, now the dependency
+states were:&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency.jpg"
+width="694"
+height="246"
+srcset="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency_hu_eb7e24219715e22.jpg 480w, https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency_hu_60a5d5889f7a694c.jpg 1024w"
+loading="lazy"
+class="gallery-image"
+data-flex-grow="282"
+data-flex-basis="677px"
+&gt;&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;code&gt;unset&lt;/code&gt; seemed invalid to be used without a tie-up with a state.
+e.g.&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:isset,A; flowbits:unset,A; sid:1;
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;seemed more correct even if there&amp;rsquo;s an extra operation instead of the open&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:unset,A; sid:2;
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;which indicates a reset operation. Now, in the beginning of a flow, the flowbit should anyway be unset, in the
+middle, if there are going to be rules using it, it&amp;rsquo;s probably better to ensure that the flowbit is in fact set
+before unsetting it. The obvious difference is that the &lt;code&gt;sid:2&lt;/code&gt; is going to match unconditionally however,
+&lt;code&gt;sid:1&lt;/code&gt; is going to fail the match in case the flowbit &lt;code&gt;A&lt;/code&gt; was not set.&lt;/p&gt;
+&lt;p&gt;After all these failures, it was time for something that should have been done much earlier. Remember the big
+lesson on SAT? Let&amp;rsquo;s put that to use to try and see if this problem can be reduced to SAT and what it might look
+like.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="an-attempt-at-converting-this-problem-to-sat"&gt;An attempt at converting this problem to SAT
+&lt;/h2&gt;&lt;p&gt;It turned out to be harder than I had thought. But, going back to the basics, we at least need&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;literals&lt;/li&gt;
+&lt;li&gt;clauses&lt;/li&gt;
+&lt;li&gt;the boolean expression&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;So, let&amp;rsquo;s turn to the most basic of flowbits rules at first.&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:set,A; sid:1;
+flowbits:isset,A; sid:2;
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Here, sid:1 (&lt;code&gt;s1&lt;/code&gt; from here on) must come before sid:2 (&lt;code&gt;s2&lt;/code&gt; from here on). This is our dependency criteria.&lt;/p&gt;
+&lt;p&gt;This can be made into the statement: &lt;strong&gt;s2 depends on s1&lt;/strong&gt; or, &lt;strong&gt;if s2 then s1&lt;/strong&gt;.
+The boolean expression for this statement can be expressed as: &lt;code&gt;¬s2 ∨ s1&lt;/code&gt; (NOT s2 OR s1)&lt;/p&gt;
+&lt;p&gt;To be sure, our favorite:&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;s1&lt;/th&gt;
+&lt;th&gt;s2&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;The expression is satisfiable in all cases except when s2 exists without s1. This is correct. &lt;code&gt;isset&lt;/code&gt; without &lt;code&gt;set&lt;/code&gt;
+is invalid and would never result in a match. This is accepted by Suricata but a warning is issued.&lt;/p&gt;
+&lt;p&gt;Let&amp;rsquo;s use slightly more complex flowbits rules now.&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:set,A; sid:1;
+flowbits:isset,B; flowbits:set,C; sid:3;
+flowbits:isset,A; flowbits:set,B; sid:2;
+flowbits:isset,C; sid:4;
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;This is exactly the flowbit and rule structure in the ticket that started this work.
+Here, the dependencies look like the following.&lt;/p&gt;
+&lt;p&gt;Flowbit &lt;code&gt;A&lt;/code&gt;: s2 depends on s1 : &lt;code&gt;¬s2 ∨ s1&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;Flowbit &lt;code&gt;B&lt;/code&gt;: s3 depends on s2 : &lt;code&gt;¬s3 ∨ s2&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;Flowbit &lt;code&gt;C&lt;/code&gt;: s4 depends on s3 : &lt;code&gt;¬s4 ∨ s3&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;Notice how we had to split things out per flowbit to make them legible.&lt;/p&gt;
+&lt;p&gt;Now, in order to convert it into CNF, we must simply AND all the individual clauses that we were able to come
+up with because they all must exist at once for the ruleset containing these 4 rules to be considered satisfiable.&lt;/p&gt;
+&lt;p&gt;CNF := &lt;code&gt;(¬s2 ∨ s1) ∧ (¬s3 ∨ s2) ∧ (¬s4 ∨ s3)&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;The truth table for this expression will be:&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;s1&lt;/th&gt;
+&lt;th&gt;s2&lt;/th&gt;
+&lt;th&gt;s3&lt;/th&gt;
+&lt;th&gt;s4&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;So, this expression is correctly satisfiable in the following cases:&lt;/p&gt;
+&lt;p&gt;i. None of the rules exist&lt;/p&gt;
+&lt;p&gt;ii: s1 exists alone&lt;/p&gt;
+&lt;p&gt;iii: s1 and s2 exist&lt;/p&gt;
+&lt;p&gt;iv: s1, s2 and s3 exist&lt;/p&gt;
+&lt;p&gt;v: all signatures exist&lt;/p&gt;
+&lt;p&gt;Since we are willing to find the exact order of the signatures, our key takeaway is point &lt;strong&gt;v&lt;/strong&gt; that states that there
+does exist a way for the dependencies to be satisfiable at runtime indeed with all the rules present.
+Note that SAT equations are &amp;ldquo;verifiable&amp;rdquo; in polynomial time.
+This time, I decided to verify my analysis using a SAT solver. One popular and easy choice is &lt;a class="link" href="https://github.com/Z3Prover/z3" target="_blank" rel="noopener"
+&gt;Z3&lt;/a&gt;
+because of the easy Python scripting syntax it offers.&lt;/p&gt;
+&lt;p&gt;A trivial Z3 script to find the solution to the given expression can be written as:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-Python" data-lang="Python"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;z3&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s4&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Bools&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s1"&gt;&amp;#39;s1 s2 s3 s4&amp;#39;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;solver&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Solver&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# CNF: (¬s2 ∨ s1) ∧ (¬s3 ∨ s2) ∧ (¬s4 ∨ s3)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s2 ∨ s1&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s3 ∨ s2&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s4&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s4 ∨ s3&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;check&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;sat&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Satisfiable equation :)&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;The solution is:&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;res&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;model&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;res&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Unsatisfiable at runtime :(&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;I found out that there was problem - Z3 only finds one solution at a time so, we have to &amp;ldquo;guide&amp;rdquo; it by blocking
+the solutions it has already found (ring a bell?) or use other ways to get &lt;em&gt;all&lt;/em&gt; the solutions. If you run the above
+script, Z3 finds you the easiest solution that is satisfiable: all values set to False.&lt;/p&gt;
+&lt;p&gt;The script with blocking clause looks like:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-Python" data-lang="Python"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;z3&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;find_all_solutions&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s4&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Bools&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s1"&gt;&amp;#39;s1 s2 s3 s4&amp;#39;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solver&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Solver&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s2 ∨ s1&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s3 ∨ s2&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;s4&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# ¬s4 ∨ s3&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solutions&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;check&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;sat&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;model&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;model&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solution&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;var&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s4&lt;/span&gt;&lt;span class="p"&gt;]:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solution&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;is_true&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;model&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;evaluate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solutions&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;append&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;solution&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;Solution #&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;solutions&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;: &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;solution&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;#34;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;blocking_clause&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;var&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;s1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;s4&lt;/span&gt;&lt;span class="p"&gt;]:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;is_true&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;model&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;evaluate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;)):&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;blocking_clause&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;append&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;blocking_clause&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;append&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="n"&gt;solver&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Or&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;blocking_clause&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt; &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;solutions&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;all_solutions&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;find_all_solutions&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;p&gt;and the output is:&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;Solution #1: {&amp;#39;s1&amp;#39;: False, &amp;#39;s2&amp;#39;: False, &amp;#39;s3&amp;#39;: False, &amp;#39;s4&amp;#39;: False}
+Solution #2: {&amp;#39;s1&amp;#39;: True, &amp;#39;s2&amp;#39;: False, &amp;#39;s3&amp;#39;: False, &amp;#39;s4&amp;#39;: False}
+Solution #3: {&amp;#39;s1&amp;#39;: True, &amp;#39;s2&amp;#39;: True, &amp;#39;s3&amp;#39;: False, &amp;#39;s4&amp;#39;: False}
+Solution #4: {&amp;#39;s1&amp;#39;: True, &amp;#39;s2&amp;#39;: True, &amp;#39;s3&amp;#39;: True, &amp;#39;s4&amp;#39;: False}
+Solution #5: {&amp;#39;s1&amp;#39;: True, &amp;#39;s2&amp;#39;: True, &amp;#39;s3&amp;#39;: True, &amp;#39;s4&amp;#39;: True}
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;so, the manual solution checking and equation creation checks out!**&lt;/p&gt;
+&lt;p&gt;Now, how can I automate the creation of the constraints? Notice how in order to create the SAT equation, I had to
+break things down per flowbit, so, at least that looks like a good route. This information is not available at the signature
+ordering time but it would have to be retrieved. The logical flow requires a map of all sids for each flowbit
+per command. This is already somewhat done in Suricata to check inconsistencies among the commands. But, this happens at
+end of the entire ordering and grouping and a warning is issued in such a case. We need more though to solve the
+ordering problem.
+Moving forward, each flowbit will have 5 arrays, let&amp;rsquo;s say we&amp;rsquo;re dealing with the same flowbits in the above example.
+There are 3 distinct flowbits.&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;Flowbit A:
+set_sids: [1]
+isset_sids: [2]
+isnotset_sids: []
+toggle_sids: []
+unset_sids: []
+Flowbit B:
+set_sids: [2]
+isset_sids: [3]
+isnotset_sids: []
+toggle_sids: []
+unset_sids: []
+Flowbit C:
+set_sids: [3]
+isset_sids: [4]
+isnotset_sids: []
+toggle_sids: []
+unset_sids: []
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Now, we must define the dependency order among the commands. So, far, it seems safe to assume that the following
+is acceptable as shown earlier:&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency.jpg"
+width="694"
+height="246"
+srcset="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency_hu_eb7e24219715e22.jpg 480w, https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/flowbits-dependency_hu_60a5d5889f7a694c.jpg 1024w"
+loading="lazy"
+class="gallery-image"
+data-flex-grow="282"
+data-flex-basis="677px"
+&gt;&lt;/p&gt;
+&lt;p&gt;Generic constraint evaluation then becomes:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;for each flowbit:&lt;/p&gt;
+&lt;p&gt;create a one to many map of isset_sids and (set_sids and toggle_sids)&lt;/p&gt;
+&lt;p&gt;create a one to many map of isnotset_sids and (unset_sids and toggle_sids)&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Create a consolidated map of all flowbit maps.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;for each entry (dependent_sid, dependee_sid) in the map&lt;/p&gt;
+&lt;p&gt;add a clause &lt;code&gt;c&lt;/code&gt;: Or(Not(dependent_sid), dependee_sid)&lt;/p&gt;
+&lt;p&gt;add the clause to SAT solver: solver.add(&lt;code&gt;c&lt;/code&gt;)&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;and that should be our final boolean expression**.&lt;/p&gt;
+&lt;p&gt;Now, running this boolean expression through a SAT solver should tell you if an arrangement is possible among
+the given set of signatures.
+But, we just learned that SAT solvers give one solution at a time. Good news is that we can freeze the literals
+to a certain value. So, in Z3, for example, we could force any variable to be true:&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;solver.add(s == True)
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;By forcing this constraint, I am basically asking SAT solver if a solution exists if &lt;strong&gt;all&lt;/strong&gt; the flowbits rules
+were enabled. If there&amp;rsquo;s no solution, we can always go to another possible solution using blocking clauses.&lt;/p&gt;
+&lt;p&gt;Now, because I know for sure which rules should be enabled to make the ruleset satisfiable at runtime, I can go
+back to directed graphs for the actual final solution. Some corrections on the last algorithm based on how I was
+able to reduce the problem to SAT are:&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Node types should only be signatures but all flowbit signatures not just the complex ones like before&lt;/li&gt;
+&lt;li&gt;The dependent-dependee map should be used to create relationships &amp;ndash; Problem that stays: we could
+still run into &amp;ldquo;unreachable&amp;rdquo; nodes which is OK but they make it hard to define the order. e.g.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/fb-unreachable-node.jpg"
+width="962"
+height="602"
+srcset="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/fb-unreachable-node_hu_7a4de4522d81b891.jpg 480w, https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/fb-unreachable-node_hu_b2d7173aa11b6944.jpg 1024w"
+loading="lazy"
+class="gallery-image"
+data-flex-grow="159"
+data-flex-basis="383px"
+&gt;&lt;/p&gt;
+&lt;p&gt;If there&amp;rsquo;s a working algorithm, it could, in theory be used without a SAT solver while rejecting any ruleset that
+has unsatisfiable rule paths (cycles).
+Ofc the downside is that Suricata would simply reject the ruleset as impossible to match at runtime without any
+helpful directions on what needs to be done. SAT solvers can help with a possible solution quickly.&lt;/p&gt;
+&lt;p&gt;Let&amp;rsquo;s also see what the SAT equation would look like in case of an unsatisfiable ruleset.&lt;/p&gt;
+&lt;pre tabindex="0"&gt;&lt;code&gt;flowbits:set,A; flowbits:isset,B; sid:1;
+flowbits:isset,A; flowbits:set,B; sid:2;
+&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Flowbit &lt;code&gt;A&lt;/code&gt;: s2 depends on s1 : &lt;code&gt;¬s2 ∨ s1&lt;/code&gt;
+Flowbit &lt;code&gt;B&lt;/code&gt;: s1 depends on s2 : &lt;code&gt;¬s1 ∨ s2&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;CNF := &lt;code&gt;(¬s2 ∨ s1) ∧ (¬s1 ∨ s2)&lt;/code&gt;&lt;/p&gt;
+&lt;p&gt;Truth table for this expression:&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;s1&lt;/th&gt;
+&lt;th&gt;s2&lt;/th&gt;
+&lt;th&gt;Output&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;td&gt;0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;td&gt;1&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;p&gt;Wut.&lt;/p&gt;
+&lt;p&gt;SAT solver says that cyclic dependency rules are solvable in two scenarios: Neither rule exists - OK.
+Both the rules exist - What? &amp;ndash; It is correct when you think about it. But, fails my usecase.&lt;/p&gt;
+&lt;p&gt;This, my dear reader was another blip in what was looking like a promising solution. Even SAT solvers and ASP
+solvers use directed graphs or ordered clauses to detect cycles as unsatisfiable.&lt;/p&gt;
+&lt;p&gt;&lt;img src="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/crying_cat.jpeg"
+width="219"
+height="148"
+srcset="https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/crying_cat_hu_6e1a43c2892f2649.jpeg 480w, https://inashivb.github.io/p/suricata-flowbits-dont-always-flow/crying_cat_hu_b6cf60d797516368.jpeg 1024w"
+loading="lazy"
+class="gallery-image"
+data-flex-grow="147"
+data-flex-basis="355px"
+&gt;&lt;/p&gt;
+&lt;h3 id="outcomes-of-the-sat-solver-approach"&gt;Outcomes of the SAT solver approach
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;While promising, SAT solvers also need guidance for special conditions.&lt;/li&gt;
+&lt;li&gt;With correct equations in SAT solvers, if a solution does not exist for all True values, we can remove that constraint
+and ask the solver to give a solution, any solution.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;**Noticed the stars above? They indicate that the equation although working for the cases at hand are incomplete.
+All equations need &lt;strong&gt;ALL&lt;/strong&gt; possible clauses which is where Tseitin encoding like algorithms come in. For example, if
+A depends on B and B depends on C then apart from these clauses, one must add a transitive clause stating that
+A must also depend on C.&lt;/p&gt;
+&lt;h2 id="conclusion"&gt;Conclusion
+&lt;/h2&gt;&lt;p&gt;The flowbits ordering issue was successfully reduced to a SAT problem.
+Can this all be done in polynomial time? For most practical cases, yes. If one were to stress test it, I don&amp;rsquo;t know.
+The complexity goes up with the increase in literals (signatures) and clauses (dependencies created by each flowbit usage).&lt;/p&gt;
+&lt;p&gt;There are alternatives like &lt;a class="link" href="https://www.cs.utexas.edu/~vl/papers/wiasp.pdf" target="_blank" rel="noopener"
+&gt;ASP&lt;/a&gt; that look promising. I don&amp;rsquo;t know if I
+will explore it but if I do, you&amp;rsquo;ll see in a blog post.&lt;/p&gt;
+&lt;p&gt;Is this a solution to the problem then?
+I don&amp;rsquo;t think so. While this research helped with the direction and clarifying what may or may not work, there are still
+edge cases, one of which I mentioned earlier in finding the actual solution.
+Stay tuned for the final solution, if any. For now, the battle continues..&lt;/p&gt;
+&lt;h3 id="mandatory-note"&gt;Mandatory Note
+&lt;/h3&gt;&lt;p&gt;I assure you I&amp;rsquo;m a human and therefore, I am bound to make mistakes. Please feel free to point any obvious mistakes in
+the analysis or the content. I decided to write this blog post despite there being no clear indication if this
+work is close to a finished state or will be accepted just because this took on and off a lot of research,
+failures, trials at different solutions and understanding several new and interesting concepts over a long period of time.&lt;/p&gt;
+&lt;p&gt;Thanks for reading! 😺&lt;/p&gt;</description></item></channel></rss>
