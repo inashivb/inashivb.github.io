@@ -236,7 +236,7 @@ awesome work here: <https://nex3.medium.com/pubgrub-2fb6470504f> the problem rem
 3. Wikipedia forever <3 <https://en.wikipedia.org/wiki/Boolean_satisfiability_problem>
 4. There are international SAT competitions! https://satcompetition.github.io
 
-# Suricata and Flowbits continued...
+## Suricata and Flowbits continued...
 
 Now, getting back to the problem at hand. It indeed started to look like a satisfiability problem
 but I saw how 2-SAT problems are solved and went head-in to see if I can reduce the problem in a way that
