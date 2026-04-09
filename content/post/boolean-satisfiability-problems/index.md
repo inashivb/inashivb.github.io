@@ -601,10 +601,10 @@ Truth table for this expression:
 Wut.
 
 SAT solver says that cyclic dependency rules are solvable in two scenarios: Neither rule exists - OK.
-Both the rules exist - What?
+Both the rules exist - What? -- It is correct when you think about it. But, fails my usecase.
 
 This, my dear reader was another blip in what was looking like a promising solution. Even SAT solvers and ASP
-solvers use directed graphs or ordered clauses to detect cycles.
+solvers use directed graphs or ordered clauses to detect cycles as unsatisfiable.
 
 ![](crying_cat.jpeg)
 
